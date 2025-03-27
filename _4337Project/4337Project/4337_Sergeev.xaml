@@ -14,7 +14,7 @@
             <Button Name="Import" Click="Import_Click" Content="Импорт данных" Width="100" Margin="10"/>
         </StackPanel>
         <StackPanel>
-            <Button Name="Export" Click="Export_Click" Content="Экспорт в Excel" Width="100" Margin="10"/>
+            <Button Name="Export" Click="Export_Click" Content="Экспорт в Word" Width="100" Margin="10"/>
         </StackPanel>
     </StackPanel>
 </Window>

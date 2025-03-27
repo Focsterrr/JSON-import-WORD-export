@@ -1,36 +1,39 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Data.SqlClient;
-using System.IO;
 using System.Globalization;
-using OfficeOpenXml;
-using System.Linq;
+using System.IO;
+using Newtonsoft.Json;
+using DocumentFormat.OpenXml;
+using DocumentFormat.OpenXml.Packaging;
+using DocumentFormat.OpenXml.Wordprocessing;
 
 namespace _4337Project
 {
     public class Sergeev_Export_Import
     {
+        
         public static void ImportData(string filePath, string connectionString, string tableName)
         {
-            FileInfo fileInfo = new FileInfo(filePath);
-            if (!fileInfo.Exists) throw new FileNotFoundException("Файл не найден.", filePath);
-
-            using (ExcelPackage package = new ExcelPackage(fileInfo))
+            try
             {
-                if (package.Workbook.Worksheets.Count == 0)
-                    throw new InvalidOperationException("Файл не содержит ни одного листа.");
+                if (!File.Exists(filePath))
+                    throw new FileNotFoundException("Файл не найден.", filePath);
 
-                ExcelWorksheet worksheet = package.Workbook.Worksheets["Лист1"];
-                worksheet.Calculate();
-                int rowCount = worksheet.Dimension?.Rows ?? 0;
-
-                if (rowCount == 0) throw new InvalidOperationException("Лист пустой.");
+                string jsonData = File.ReadAllText(filePath);
+                List<Order> orders = ImportJsonData(jsonData);
 
                 CreateTable(connectionString, tableName);
-                SaveDataToTable(connectionString, tableName, worksheet, rowCount);
+                SaveDataToTable(connectionString, tableName, orders);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка при импорте: {ex.Message}");
+                throw;
             }
         }
 
+       
         private static void CreateTable(string connectionString, string tableName)
         {
             using (SqlConnection connection = new SqlConnection(connectionString))
@@ -58,28 +61,13 @@ namespace _4337Project
             }
         }
 
-        private static void SaveDataToTable(string connectionString, string tableName, ExcelWorksheet worksheet, int rowCount)
+        private static void SaveDataToTable(string connectionString, string tableName, List<Order> orders)
         {
             using (SqlConnection connection = new SqlConnection(connectionString))
             {
                 connection.Open();
-                for (int row = 2; row <= rowCount; row++)
+                foreach (var order in orders)
                 {
-                    string orderCode = worksheet.Cells[row, 2].Text.Trim(); // Код заказа (столбец 2)
-                    string orderDateText = worksheet.Cells[row, 3].Text.Trim(); // Дата создания (столбец 3)
-                    string orderTimeText = worksheet.Cells[row, 4].Text.Trim(); // Время заказа (столбец 4)
-                    string clientCode = worksheet.Cells[row, 5].Text.Trim(); // Код клиента (столбец 5)
-                    string services = worksheet.Cells[row, 6].Text.Trim(); // Услуги (столбец 6)
-                    string status = worksheet.Cells[row, 7].Text.Trim(); // Статус (столбец 7)
-                    string closeDateText = worksheet.Cells[row, 8].Text.Trim(); // Дата закрытия (столбец 8)
-                    string rentalTime = worksheet.Cells[row, 9].Text.Trim(); // Время проката (столбец 9)
-
-                    // Парсинг даты и времени
-                    DateTime? orderDate = ParseDate(orderDateText);
-                    TimeSpan? orderTime = ParseTime(orderTimeText);
-                    DateTime? closeDate = ParseDate(closeDateText);
-
-                    // SQL-запрос
                     string insertQuery = $@"
                     INSERT INTO {tableName} (
                         [Код заказа], [Дата создания], [Время заказа], [Код клиента], 
@@ -88,14 +76,15 @@ namespace _4337Project
 
                     using (SqlCommand command = new SqlCommand(insertQuery, connection))
                     {
-                        command.Parameters.AddWithValue("@p1", (object)orderCode ?? DBNull.Value);
-                        command.Parameters.AddWithValue("@p2", (object)orderDate ?? DBNull.Value);
-                        command.Parameters.AddWithValue("@p3", (object)orderTime ?? DBNull.Value);
-                        command.Parameters.AddWithValue("@p4", (object)clientCode ?? DBNull.Value);
-                        command.Parameters.AddWithValue("@p5", (object)services ?? DBNull.Value);
-                        command.Parameters.AddWithValue("@p6", (object)status ?? DBNull.Value);
-                        command.Parameters.AddWithValue("@p7", (object)closeDate ?? DBNull.Value);
-                        command.Parameters.AddWithValue("@p8", (object)rentalTime ?? DBNull.Value);
+                        command.Parameters.AddWithValue("@p1", order.CodeOrder ?? (object)DBNull.Value);
+                        command.Parameters.AddWithValue("@p2", order.ParsedCreateDate.HasValue ? order.ParsedCreateDate.Value.ToString("yyyy-MM-dd") : (object)DBNull.Value);
+                        command.Parameters.AddWithValue("@p3", order.ParsedCreateTime.HasValue ? order.ParsedCreateTime.Value.ToString(@"hh\:mm") : (object)DBNull.Value);
+                        command.Parameters.AddWithValue("@p4", order.CodeClient ?? (object)DBNull.Value);
+                        command.Parameters.AddWithValue("@p5", order.Services ?? (object)DBNull.Value);
+                        command.Parameters.AddWithValue("@p6", order.Status ?? (object)DBNull.Value);
+                        command.Parameters.AddWithValue("@p7", order.ParsedClosedDate.HasValue ? order.ParsedClosedDate.Value.ToString("yyyy-MM-dd") : (object)DBNull.Value);
+                        command.Parameters.AddWithValue("@p8", order.ProkatTime ?? (object)DBNull.Value);
+
                         command.ExecuteNonQuery();
                     }
                 }
@@ -104,14 +93,21 @@ namespace _4337Project
 
         public static void ExportData(string connectionString, string tableName, string outputFilePath)
         {
-            List<Dictionary<string, object>> data = GetDataFromTable(connectionString, tableName);
-            var groupedData = data.GroupBy(row => row["Дата создания"]?.ToString() ?? "Нет даты");
-            CreateExcel(groupedData, outputFilePath);
+            try
+            {
+                List<Order> orders = GetDataFromTable(connectionString, tableName);
+                CreateWordDocument(orders, outputFilePath);
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Ошибка при экспорте: {ex.Message}");
+                throw;
+            }
         }
 
-        private static List<Dictionary<string, object>> GetDataFromTable(string connectionString, string tableName)
+        private static List<Order> GetDataFromTable(string connectionString, string tableName)
         {
-            List<Dictionary<string, object>> data = new List<Dictionary<string, object>>();
+            List<Order> orders = new List<Order>();
             using (SqlConnection connection = new SqlConnection(connectionString))
             {
                 connection.Open();
@@ -122,88 +118,138 @@ namespace _4337Project
                     {
                         while (reader.Read())
                         {
-                            Dictionary<string, object> row = new Dictionary<string, object>();
-                            for (int i = 0; i < reader.FieldCount; i++)
+                            orders.Add(new Order
                             {
-                                string columnName = reader.GetName(i);
-                                row[columnName] = reader.IsDBNull(i) ? null : reader.GetValue(i);
-                            }
-                            data.Add(row);
+                                Id = (int)reader["Id"],
+                                CodeOrder = reader["Код заказа"].ToString(),
+                                ParsedCreateDate = reader["Дата создания"] as DateTime?,
+                                ParsedCreateTime = reader["Время заказа"] as TimeSpan?,
+                                CodeClient = reader["Код клиента"].ToString(),
+                                Services = reader["Услуги"].ToString(),
+                                Status = reader["Статус"].ToString(),
+                                ParsedClosedDate = reader["Дата закрытия"] as DateTime?,
+                                ProkatTime = reader["Время проката"].ToString()
+                            });
                         }
                     }
                 }
             }
-            return data;
+            return orders;
         }
 
-        private static void CreateExcel(IEnumerable<IGrouping<string, Dictionary<string, object>>> groupedData, string outputFilePath)
+        private static void CreateWordDocument(List<Order> orders, string outputFilePath)
         {
-            FileInfo newFile = new FileInfo(outputFilePath);
-            if (newFile.Exists) newFile.Delete();
-
-            using (ExcelPackage package = new ExcelPackage(newFile))
+            using (WordprocessingDocument wordDoc = WordprocessingDocument.Create(outputFilePath, WordprocessingDocumentType.Document))
             {
-                foreach (var group in groupedData)
+                MainDocumentPart mainPart = wordDoc.AddMainDocumentPart();
+                mainPart.Document = new Document();
+                Body body = new Body();
+
+                Paragraph title = new Paragraph(new Run(new Text("Отчёт о заказах")));
+                title.ParagraphProperties = new ParagraphProperties(new Justification() { Val = JustificationValues.Center });
+                body.Append(title);
+
+                Table table = new Table();
+
+                // Добавляем заголовки
+                TableRow headerRow = new TableRow();
+                string[] headers = { "Id", "Код заказа", "Код клиента", "Услуги" };
+                foreach (var header in headers)
                 {
-                    ExcelWorksheet worksheet = package.Workbook.Worksheets.Add(group.Key);
-                    string[] columnNames = { "Id", "Код заказа", "Дата создания", "Время заказа", "Код клиента", "Услуги", "Статус", "Дата закрытия", "Время проката" };
+                    headerRow.Append(new TableCell(new Paragraph(new Run(new Text(header)))));
+                }
+                table.Append(headerRow);
 
-                    // Заголовки столбцов
-                    for (int i = 0; i < columnNames.Length; i++)
+                // Добавляем данные
+                foreach (var order in orders)
+                {
+                    TableRow row = new TableRow();
+                    row.Append(new TableCell(new Paragraph(new Run(new Text(order.Id.ToString())))));
+                    row.Append(new TableCell(new Paragraph(new Run(new Text(order.CodeOrder)))));
+                    row.Append(new TableCell(new Paragraph(new Run(new Text(order.CodeClient)))));
+                    row.Append(new TableCell(new Paragraph(new Run(new Text(order.Services)))));
+
+                    table.Append(row);
+                }
+
+                body.Append(table);
+                mainPart.Document.Append(body);
+                mainPart.Document.Save();
+            }
+        }
+        private static List<Order> ImportJsonData(string jsonData)
+        {
+            var settings = new JsonSerializerSettings
+            {
+                DateFormatString = "dd.MM.yyyy", 
+                NullValueHandling = NullValueHandling.Ignore 
+            };
+
+            var orders = JsonConvert.DeserializeObject<List<Order>>(jsonData, settings);
+
+            foreach (var order in orders)
+            {
+                if (!string.IsNullOrEmpty(order.CreateDate))
+                {
+                    if (DateTime.TryParseExact(order.CreateDate, "dd.MM.yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out var createDate))
                     {
-                        worksheet.Cells[1, i + 1].Value = columnNames[i];
+                        order.ParsedCreateDate = createDate;
                     }
-
-                    // Данные
-                    int row = 2;
-                    foreach (var record in group)
+                    else
                     {
-                        for (int i = 0; i < columnNames.Length; i++)
-                        {
-                            var cell = worksheet.Cells[row, i + 1];
-                            var value = record[columnNames[i]] ?? "Нет данных";
-
-                            // Убедитесь, что "Код заказа" записывается как текст
-                            if (columnNames[i] == "Код заказа")
-                            {
-                                cell.Value = "'" + value.ToString(); // Добавляем апостроф для принудительного текстового формата
-                                cell.Style.Numberformat.Format = "@"; // Устанавливаем текстовый формат
-                            }
-                            else
-                            {
-                                cell.Value = value;
-                            }
-                        }
-                        row++;
+                        order.ParsedCreateDate = null; 
                     }
                 }
-                package.Save();
-            }
-        }
 
-        private static DateTime? ParseDate(string dateText)
-        {
-            if (string.IsNullOrEmpty(dateText)) return null;
-            if (double.TryParse(dateText, out double dateNum))
-            {
-                return DateTime.FromOADate(dateNum);
-            }
-            else if (DateTime.TryParseExact(dateText, "dd.MM.yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out DateTime parsedDate))
-            {
-                return parsedDate;
-            }
-            return null;
-        }
+                if (!string.IsNullOrEmpty(order.CreateTime))
+                {
+                    if (TimeSpan.TryParse(order.CreateTime, out var createTime))
+                    {
+                        order.ParsedCreateTime = createTime;
+                    }
+                    else
+                    {
+                        order.ParsedCreateTime = null; 
+                    }
+                }
 
-        private static TimeSpan? ParseTime(string timeText)
-        {
-            if (string.IsNullOrEmpty(timeText)) return null;
-            if (TimeSpan.TryParseExact(timeText, "hh\\:mm", CultureInfo.InvariantCulture, out TimeSpan parsedTime))
-            {
-                return parsedTime;
+                if (!string.IsNullOrEmpty(order.ClosedDate))
+                {
+                    if (DateTime.TryParseExact(order.ClosedDate, "dd.MM.yyyy", CultureInfo.InvariantCulture, DateTimeStyles.None, out var closedDate))
+                    {
+                        order.ParsedClosedDate = closedDate;
+                    }
+                    else
+                    {
+                        order.ParsedClosedDate = null; 
+                    }
+                }
             }
-            return null;
+
+            return orders;
         }
     }
+
+    public class Order
+    {
+        public int Id { get; set; }
+        public string CodeOrder { get; set; }
+
+        public string CreateDate { get; set; } 
+        public string CreateTime { get; set; } 
+        public string CodeClient { get; set; }
+        public string Services { get; set; }
+        public string Status { get; set; }
+        public string ClosedDate { get; set; } 
+        public string ProkatTime { get; set; }
+
+        [JsonIgnore] 
+        public DateTime? ParsedCreateDate { get; set; }
+
+        [JsonIgnore] 
+        public TimeSpan? ParsedCreateTime { get; set; }
+
+        [JsonIgnore] 
+        public DateTime? ParsedClosedDate { get; set; }
+    }
 }
-    
